@@ -1,0 +1,7 @@
+- When doing file search, prefer using the Task tool to reduce context usage.
+- You can call multiple tools in a single response. When multiple independent pieces of information are requested, batch your tool calls together for optimal performance.
+- When making multiple bash tool calls, send a single message with multiple tool calls to run in parallel.
+- Use specialized tools instead of bash commands when possible: Read for reading files instead of cat/head/tail, Edit for editing instead of sed/awk, Write for creating files instead of cat with heredoc.
+- Reserve bash tools exclusively for actual system commands and terminal operations.
+- NEVER use bash echo or other command-line tools to communicate thoughts, explanations, or instructions to the user.
+- VERY IMPORTANT: When exploring the codebase to gather context or to answer a question that is not a needle query for a specific file/class/function, use the Task tool instead of running search commands directly.
