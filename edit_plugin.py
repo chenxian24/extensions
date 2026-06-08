@@ -225,7 +225,11 @@ class EditPlugin(Plugin):
         content_dedent = textwrap.dedent(content)
         if old_dedent != old and old_dedent in content_dedent:
             idx = content_dedent.find(old_dedent)
-            return content_dedent[:idx] + new + content_dedent[idx + len(old_dedent):], 1
+            content_indent = EditPlugin._common_indent(content)
+            line_range = EditPlugin._dedented_line_range(content, content_dedent, idx, idx + len(old_dedent), content_indent)
+            if line_range is not None:
+                orig_start, orig_end = line_range
+                return content[:orig_start] + new + content[orig_end:], 1
 
         # Strategy 6: Escape-normalized (\r\n → \n, \t → spaces)
         old_esc = old.replace("\r\n", "\n").replace("\t", "    ")
@@ -237,10 +241,10 @@ class EditPlugin(Plugin):
             orig_end = EditPlugin._map_normalized_to_orig(content, content_esc, idx + len(old_esc))
             if orig_start is not None and orig_end is not None:
                 if replace_all:
-                    # For replace_all with escape normalization, use regex
+                    # For replace_all with escape normalization, use regex on original content
                     pattern = re.escape(old_esc).replace(r"\n", r"[\r\n]").replace(r"\t", r"[\t ]")
                     try:
-                        return re.subn(pattern, new.replace("\\", "\\\\"), content_esc)
+                        return re.subn(pattern, new.replace("\\", "\\\\"), content)
                     except re.error:
                         pass
                 return content[:orig_start] + new + content[orig_end:], 1
@@ -352,9 +356,86 @@ class EditPlugin(Plugin):
             if orig_idx < len(original) and original[orig_idx] == '\r' and norm_cur < len(normalized) and normalized[norm_cur] == '\n':
                 orig_idx += 1
                 continue
+            # \t in original was normalized to 4 spaces
+            if orig_idx < len(original) and original[orig_idx] == '\t':
+                norm_cur += 4
+                orig_idx += 1
+                continue
             orig_idx += 1
             norm_cur += 1
         return orig_idx if norm_cur == norm_idx else None
+
+    @staticmethod
+    def _common_indent(s: str) -> str:
+        """Return the common leading whitespace across all lines."""
+        import re
+        lines = s.split("\n")
+        non_empty = [l for l in lines if l.strip()]
+        if not non_empty:
+            return ""
+        match = re.match(r"^(\s*)", non_empty[0])
+        if not match:
+            return ""
+        indent = match.group(1)
+        for line in non_empty[1:]:
+            if not line.startswith(indent):
+                # Find common prefix
+                new_indent = []
+                for a, b in zip(indent, line):
+                    if a == b:
+                        new_indent.append(a)
+                    else:
+                        break
+                indent = "".join(new_indent)
+        return indent
+
+    @staticmethod
+    def _dedented_pos_to_orig(original: str, dedented: str, dedented_idx: int, indent: str) -> int | None:
+        """Map a position in dedented text back to original, accounting for removed indent on each line."""
+        indent_len = len(indent)
+        ded_pos = 0
+        line_start_orig = 0
+        for orig_line in original.split("\n"):
+            ded_line_start = ded_pos
+            ded_line = orig_line[indent_len:] if orig_line.startswith(indent) else orig_line
+            ded_line_len = len(ded_line)
+            if ded_line_start + ded_line_len >= dedented_idx:
+                offset = dedented_idx - ded_line_start
+                if offset == ded_line_len:
+                    return line_start_orig + len(orig_line)
+                return line_start_orig + indent_len + offset
+            ded_pos = ded_line_start + ded_line_len + 1  # +1 for \n
+            line_start_orig += len(orig_line) + 1  # +1 for \n
+        return len(original) if dedented_idx >= len(dedented) else None
+
+    @staticmethod
+    def _dedented_line_range(original: str, dedented: str, ded_start: int, ded_end: int, indent: str) -> tuple[int, int] | None:
+        """Find the line-based range in original corresponding to ded_start:ded_end in dedented.
+
+        Returns (orig_start, orig_end) for splicing. orig_end excludes the trailing newline
+        so it stays in the output.
+        """
+        indent_len = len(indent)
+        ded_pos = 0
+        line_start_orig = 0
+        orig_lines = original.split("\n")
+        result_start = None
+        result_end = None
+        for i, orig_line in enumerate(orig_lines):
+            ded_line_start = ded_pos
+            ded_line = orig_line[indent_len:] if orig_line.startswith(indent) else orig_line
+            ded_line_len = len(ded_line)
+            ded_line_end = ded_line_start + ded_line_len
+            if ded_line_end > ded_start and ded_line_start < ded_end:
+                if result_start is None:
+                    result_start = line_start_orig
+                # End at line content (not including trailing \n)
+                result_end = line_start_orig + len(orig_line)
+            ded_pos = ded_line_end + 1  # +1 for \n
+            line_start_orig += len(orig_line) + 1
+        if result_start is not None and result_end is not None:
+            return result_start, result_end
+        return None
 
     # --- apply_patch ---
 

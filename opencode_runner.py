@@ -21,16 +21,11 @@ from pathlib import Path
 from typing import Any
 
 from agentcore.config.schema import AgentConfig, ModelConfig, RuntimeConfig, SystemPromptConfig
-from agentcore.context.engine import ContextEngine
 from agentcore.core.engine import AgentEngine
-from agentcore.core.message import Message, MessageRole
-from agentcore.events.bus import EventBus
-from agentcore.hooks.manager import HookManager
-from agentcore.hooks.types import HookContext, HookName
-from agentcore.models.base import ChatParams, LLMMessage, ToolCall
+from agentcore.models.events import StreamEvent, StreamEventType
 from agentcore.plugins.manager import PluginManager
-from agentcore.tools.registry import ToolRegistry
 from agentcore.prompts.builder import DynamicPromptBuilder
+from agentcore.runtime import AgentRuntime
 
 # Extension plugins
 from extensions.agents_plugin import AgentsPlugin
@@ -131,16 +126,6 @@ def build_config(config_plugin: ConfigPlugin | None = None) -> AgentConfig:
     )
 
 
-def _message_to_llm(msg: Message) -> LLMMessage:
-    return LLMMessage(
-        role=msg.role.value,
-        content=msg.content,
-        name=msg.name,
-        tool_call_id=msg.tool_call_id,
-        tool_calls=msg.tool_calls,
-    )
-
-
 # ---------------------------------------------------------------------------
 # Main run loop
 # ---------------------------------------------------------------------------
@@ -157,22 +142,16 @@ async def run() -> None:
     engine = AgentEngine(config)
     config.metadata["_engine"] = engine  # For agents_plugin
 
-    # --- Mechanism layer ---
-    hooks = HookManager()
-    tools = ToolRegistry()
-    context = ContextEngine()
-    events = EventBus()
-
     # --- Plugin layer ---
     agents_plugin = AgentsPlugin()
     instruction_plugin = InstructionPlugin(work_dir=".")
 
     pm = PluginManager(
         config=config,
-        hooks=hooks,
-        tools=tools,
-        context=context,
-        events=events,
+        hooks=None,
+        tools=None,
+        context=None,
+        events=None,
     )
     pm.register(config_plugin)
     pm.register(CoreToolkitPlugin())
@@ -186,7 +165,10 @@ async def run() -> None:
     pm.register(instruction_plugin)
     pm.register(CommandsPlugin())
     pm.register(SkillsPlugin())
-    await pm.initialize_all()
+
+    # --- Runtime (composes hooks, tools, context, events, plugins) ---
+    runtime = AgentRuntime(engine=engine, plugins=pm)
+    await runtime.initialize()
 
     # --- Build system prompt ---
     hermes_config = config.metadata.get("hermes", {})
@@ -231,7 +213,7 @@ async def run() -> None:
         extra_sections[key] = _md_sections.get(key, fallback_val)
 
     prompt_builder = DynamicPromptBuilder(
-        tool_registry=tools,
+        tool_registry=runtime.tools,
         base_prompt=config.system_prompt.template,
         identity=OPENCODE_IDENTITY,
         extra_sections=extra_sections if extra_sections else None,
@@ -243,91 +225,9 @@ async def run() -> None:
     session_dir = Path(hermes_config.get("session_dir", Path.home() / ".opencode" / "sessions"))
     session_dir.mkdir(parents=True, exist_ok=True)
     session_name = f"session-{int(time.time())}"
-    session = engine.create_session(session_name)
+    session = await runtime.create_session(session_name)
 
-    # Dispatch SESSION_START hook
-    await hooks.dispatch(HookContext(
-        name=HookName.SESSION_START,
-        session=session,
-        engine=engine,
-        hooks=hooks, tools=tools, context=context, events=events,
-    ))
-
-    # --- Tool executor ---
-    async def _tool_executor(tc: ToolCall) -> dict:
-        ctx = HookContext(
-            name=HookName.PRE_TOOL_CALL,
-            tool_call=tc,
-            session=session,
-            engine=engine,
-            hooks=hooks,
-            tools=tools,
-            context=context,
-            events=events,
-        )
-        await hooks.dispatch(ctx)
-        if ctx.cancel:
-            return {"success": False, "output": None, "error": ctx.metadata.get("cancel_reason", "Denied")}
-        result = await tools.execute(tc)
-        post_ctx = HookContext(
-            name=HookName.POST_TOOL_CALL,
-            tool_call=tc,
-            tool_result=result,
-            session=session,
-            engine=engine,
-            hooks=hooks,
-            tools=tools,
-            context=context,
-            events=events,
-        )
-        await hooks.dispatch(post_ctx)
-
-        # TRANSFORM_TERMINAL_OUTPUT hook — for shell command tools
-        if tc.function.name in ("execute_command", "execute_sandboxed"):
-            term_ctx = HookContext(
-                name=HookName.TRANSFORM_TERMINAL_OUTPUT,
-                tool_call=tc,
-                tool_result=result,
-                session=session, engine=engine,
-                hooks=hooks, tools=tools, context=context, events=events,
-                metadata={"output": result.get("output", "")},
-            )
-            await hooks.dispatch(term_ctx)
-            if term_ctx.transform_result is not None:
-                result["output"] = term_ctx.transform_result
-
-        # TRANSFORM_TOOL_RESULT hook — allow plugins to modify tool output
-        transform_ctx = HookContext(
-            name=HookName.TRANSFORM_TOOL_RESULT,
-            tool_call=tc,
-            tool_result=result,
-            session=session,
-            engine=engine,
-            hooks=hooks,
-            tools=tools,
-            context=context,
-            events=events,
-            metadata={"output": result.get("output", "")},
-        )
-        await hooks.dispatch(transform_ctx)
-        if transform_ctx.transform_result is not None:
-            result["output"] = transform_ctx.transform_result
-
-        return result
-
-    # --- Callbacks ---
-    async def _on_tool_call(tc: ToolCall, _messages: list) -> None:
-        print(_color(f"\n  [{tc.function.name}]", Colors.CYAN), flush=True)
-
-    async def _on_tool_result(tc: ToolCall, result: dict, _messages: list) -> None:
-        output = result.get("output", "")
-        if output:
-            display = str(output)[:300]
-            if len(str(output)) > 300:
-                display += "..."
-            print(_color(f"  {display}", Colors.DIM), flush=True)
-        return None
-
+    # --- Session save helper ---
     def _auto_save() -> None:
         if not session.messages:
             return
@@ -341,79 +241,8 @@ async def run() -> None:
         except Exception:
             pass
 
-    # --- Chat function ---
-    async def chat(user_input: str) -> str:
-        pre_ctx = HookContext(
-            name=HookName.PRE_BUILD_MESSAGES,
-            user_input=user_input,
-            session=session,
-            engine=engine,
-            hooks=hooks,
-            tools=tools,
-            context=context,
-            events=events,
-        )
-        await hooks.dispatch(pre_ctx)
-        if pre_ctx.cancel:
-            reason = pre_ctx.metadata.get("cancel_reason", "Cancelled")
-            print(_color(reason, Colors.YELLOW))
-            return reason
-
-        session.add_message(Message.user(user_input))
-
-        compressed = context.compress(session.messages, max_tokens=config.context.max_tokens)
-        llm_messages = [_message_to_llm(m) for m in compressed]
-
-        params = ChatParams(
-            model=config.model.model,
-            temperature=config.model.temperature,
-            max_tokens=config.model.max_tokens,
-            tools=tools.get_tool_definitions(),
-        )
-
-        original_count = len(llm_messages)
-        response = await engine.chat_with_tools(
-            messages=llm_messages,
-            params=params,
-            tool_executor=_tool_executor,
-            max_rounds=config.runtime.max_tool_rounds,
-            on_tool_call=_on_tool_call,
-            on_tool_result=_on_tool_result,
-        )
-
-        # Store intermediate messages (tool calls + results) into session
-        for llm_msg in llm_messages[original_count:]:
-            session.add_message(Message(
-                role=MessageRole(llm_msg.role),
-                content=llm_msg.content,
-                name=llm_msg.name,
-                tool_call_id=llm_msg.tool_call_id,
-                tool_calls=llm_msg.tool_calls,
-            ))
-
-        response_content = response.content
-
-        # TRANSFORM_LLM_OUTPUT hook — allow plugins to modify LLM response
-        llm_ctx = HookContext(
-            name=HookName.TRANSFORM_LLM_OUTPUT,
-            response=response,
-            session=session,
-            engine=engine,
-            hooks=hooks,
-            tools=tools,
-            context=context,
-            events=events,
-            metadata={"output": response_content},
-        )
-        await hooks.dispatch(llm_ctx)
-        if llm_ctx.transform_result is not None:
-            response_content = llm_ctx.transform_result
-
-        session.add_message(Message.assistant(response_content))
-        return response_content
-
     # --- CLI loop ---
-    tool_count = len(tools.list_names())
+    tool_count = len(runtime.tools.list_names())
     model_family = _detect_model_family(config.model.model)
 
     print(_color("OpenCode CLI", Colors.BOLD, Colors.BLUE), end="")
@@ -432,8 +261,22 @@ async def run() -> None:
                 continue
 
             try:
-                response = await chat(user_input)
-                print(_color("OpenCode: ", Colors.BLUE, Colors.BOLD) + response)
+                print(_color("OpenCode: ", Colors.BLUE, Colors.BOLD), end="", flush=True)
+                async for event in runtime.run(user_input, max_rounds=config.runtime.max_tool_rounds):
+                    if event.type == StreamEventType.TEXT_DELTA and event.text:
+                        print(event.text, end="", flush=True)
+                    elif event.type == StreamEventType.ERROR:
+                        print(_color(f"\n[Error: {event.error}]", Colors.RED), flush=True)
+                    elif event.type == StreamEventType.TOOL_RESULT:
+                        result = event.tool_result or {}
+                        output = result.get("output", result.get("error", ""))
+                        if output:
+                            display = str(output)[:300]
+                            if len(str(output)) > 300:
+                                display += "..."
+                            print(_color(f"  {display}", Colors.DIM), flush=True)
+                        print(_color("OpenCode: ", Colors.BLUE, Colors.BOLD), end="", flush=True)
+                print()  # newline after response
             except KeyboardInterrupt:
                 print(_color("\n[Interrupted]", Colors.YELLOW))
                 continue
@@ -446,16 +289,10 @@ async def run() -> None:
     except KeyboardInterrupt:
         print(_color("\nGoodbye!", Colors.BLUE))
     finally:
-        # Dispatch SESSION_END hook
-        await hooks.dispatch(HookContext(
-            name=HookName.SESSION_END,
-            session=session,
-            engine=engine,
-            hooks=hooks, tools=tools, context=context, events=events,
-        ))
+        await runtime.end_session()
         _auto_save()
         print(_color(f"Session saved: {session_name}.json", Colors.DIM))
-        await pm.shutdown_all()
+        await runtime.shutdown()
 
 
 def main() -> None:

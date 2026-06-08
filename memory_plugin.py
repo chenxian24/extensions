@@ -148,7 +148,7 @@ class MemoryPlugin(Plugin):
 
     async def _save_memory(self, content: str, tags: str = "") -> dict[str, Any]:
         if not self._conn:
-            return {"error": "Memory not initialized"}
+            return {"output": "Memory not initialized", "error": "Memory not initialized"}
 
         # If tags contain "file", also save to MEMORY.md
         tag_list = [t.strip() for t in tags.split(",") if t.strip()]
@@ -169,7 +169,7 @@ class MemoryPlugin(Plugin):
 
     async def _search_memory(self, query: str) -> dict[str, Any]:
         if not self._conn:
-            return {"error": "Memory not initialized"}
+            return {"output": "Memory not initialized", "error": "Memory not initialized"}
         cursor = self._conn.execute(
             "SELECT m.content, m.tags, m.created_at FROM memories_fts fts "
             "JOIN memories m ON m.id = fts.rowid "

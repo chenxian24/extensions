@@ -242,7 +242,6 @@ class SandboxPlugin(Plugin):
         - SANDBOX=1 marker
         - Tmp working directory if none specified
         """
-        import tempfile
 
         # Create a sanitized environment
         safe_env = {

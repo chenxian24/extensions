@@ -1,6 +1,6 @@
-"""Tools Plugin — native file operation tools for Hermes.
+"""Tools Plugin — native file operation tools.
 
-Provides glob_files, grep_files, edit_file, and list_directory
+Provides glob_files, grep_files, and list_directory
 as pure Python tools registered via PluginContext.
 """
 
@@ -9,7 +9,6 @@ from __future__ import annotations
 import fnmatch
 import os
 import re
-import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +21,6 @@ class ToolsPlugin(Plugin):
     Tools:
         glob_files(pattern, path?) — find files by glob pattern
         grep_files(pattern, path?, glob?) — search file contents with regex
-        edit_file(path, old_string, new_string, replace_all?) — fuzzy file editing
         list_directory(path?) — list directory contents
     """
 
@@ -36,7 +34,7 @@ class ToolsPlugin(Plugin):
 
     @property
     def description(self) -> str:
-        return "Native file operation tools (glob, grep, edit, list)"
+        return "Native file operation tools (glob, grep, list)"
 
     async def setup(self, ctx: PluginContext) -> None:
         ctx.register_tool(
@@ -69,21 +67,6 @@ class ToolsPlugin(Plugin):
             },
         )
         ctx.register_tool(
-            "edit_file",
-            self._edit_file,
-            description="Edit a file by replacing old_string with new_string. Uses fuzzy matching: exact → trimmed → normalized whitespace.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "File path to edit"},
-                    "old_string": {"type": "string", "description": "Text to find and replace"},
-                    "new_string": {"type": "string", "description": "Replacement text"},
-                    "replace_all": {"type": "boolean", "description": "Replace all occurrences (default: false)"},
-                },
-                "required": ["path", "old_string", "new_string"],
-            },
-        )
-        ctx.register_tool(
             "list_directory",
             self._list_directory,
             description="List files and directories at a given path. Returns entries with type indicators.",
@@ -108,15 +91,18 @@ class ToolsPlugin(Plugin):
             if match.is_file():
                 try:
                     rel = match.relative_to(root)
-                    matches.append(str(rel))
                 except ValueError:
-                    matches.append(str(match))
-            if len(matches) >= 500:
-                break
+                    rel = match
+                matches.append(str(rel))
 
         matches.sort()
         if not matches:
             return {"output": f"No files matching '{pattern}' in {path}"}
+
+        if len(matches) > 200:
+            matches = matches[:200]
+            matches.append(f"... and more (showing first 200)")
+
         return {"output": "\n".join(matches)}
 
     async def _grep_files(
@@ -137,147 +123,37 @@ class ToolsPlugin(Plugin):
         except re.error as e:
             return {"output": f"Invalid regex: {e}", "error": f"Invalid regex: {e}"}
 
-        matches: list[str] = []
-        files_to_search: list[Path] = []
+        matches = []
+        search_path = root if root.is_dir() else root.parent
+        file_pattern = root.name if root.is_file() else glob
 
-        if root.is_file():
-            files_to_search.append(root)
-        else:
-            for f in root.rglob("*"):
-                if f.is_file() and fnmatch.fnmatch(f.name, glob):
-                    files_to_search.append(f)
-
-        for fpath in files_to_search:
+        for file_path in search_path.rglob(file_pattern):
+            if not file_path.is_file():
+                continue
+            # Skip binary files and common non-text extensions
+            if file_path.suffix in (".pyc", ".pyo", ".so", ".dll", ".exe", ".bin", ".jpg", ".png", ".gif", ".zip", ".tar", ".gz"):
+                continue
             try:
-                text = fpath.read_text(encoding="utf-8", errors="replace")
+                content = file_path.read_text(encoding="utf-8", errors="ignore")
             except (OSError, PermissionError):
                 continue
 
-            for line_num, line in enumerate(text.splitlines(), 1):
+            for line_num, line in enumerate(content.splitlines(), 1):
                 if regex.search(line):
                     try:
-                        rel = fpath.relative_to(root)
-                        matches.append(f"{rel}:{line_num}: {line.rstrip()}")
+                        rel = file_path.relative_to(root)
                     except ValueError:
-                        matches.append(f"{fpath}:{line_num}: {line.rstrip()}")
+                        rel = file_path
+                    matches.append(f"{rel}:{line_num}: {line.rstrip()[:200]}")
                     if len(matches) >= max_results:
-                        return {"output": "\n".join(matches) + f"\n[truncated at {max_results} matches]"}
+                        break
+            if len(matches) >= max_results:
+                break
 
         if not matches:
             return {"output": f"No matches for '{pattern}' in {path}"}
+
         return {"output": "\n".join(matches)}
-
-    async def _edit_file(
-        self,
-        path: str,
-        old_string: str,
-        new_string: str,
-        replace_all: bool = False,
-    ) -> dict[str, Any]:
-        p = Path(path).resolve()
-        if not p.exists():
-            return {"output": f"File does not exist: {path}", "error": f"File does not exist: {path}"}
-        if not p.is_file():
-            return {"output": f"Not a file: {path}", "error": f"Not a file: {path}"}
-
-        try:
-            content = p.read_text(encoding="utf-8", errors="replace")
-        except (OSError, PermissionError) as e:
-            return {"output": f"Cannot read file: {e}", "error": f"Cannot read file: {e}"}
-
-        # Try matching strategies (simplified 9-replacer chain)
-        result = self._fuzzy_replace(content, old_string, new_string, replace_all)
-
-        if result is None:
-            # Show context around potential near-matches for debugging
-            return {
-                "output": f"old_string not found in {path}. Ensure the text matches exactly.",
-                "error": f"old_string not found in {path}",
-            }
-
-        new_content, count = result
-        if count == 0:
-            return {"output": f"No changes made to {path}", "error": "No matches found"}
-
-        try:
-            p.write_text(new_content, encoding="utf-8")
-        except (OSError, PermissionError) as e:
-            return {"output": f"Cannot write file: {e}", "error": f"Cannot write file: {e}"}
-
-        return {"output": f"Edited {path}: {count} replacement(s)"}
-
-    @staticmethod
-    def _fuzzy_replace(
-        content: str,
-        old: str,
-        new: str,
-        replace_all: bool,
-    ) -> tuple[str, int] | None:
-        """Try multiple matching strategies to find and replace text.
-
-        Returns (new_content, count) or None if no match found.
-        """
-        # Strategy 1: Exact match
-        if old in content:
-            if replace_all:
-                return content.replace(old, new), content.count(old)
-            return content.replace(old, new, 1), 1
-
-        # Strategy 2: Line-trimmed match (strip trailing whitespace)
-        old_lines = old.splitlines()
-        content_lines = content.splitlines()
-        if len(old_lines) > 1:
-            old_trimmed = "\n".join(l.rstrip() for l in old_lines)
-            content_trimmed = "\n".join(l.rstrip() for l in content_lines)
-            if old_trimmed in content_trimmed:
-                # Find position in trimmed, apply to original
-                idx = content_trimmed.find(old_trimmed)
-                if idx >= 0:
-                    # Map back to original content positions
-                    orig_idx = 0
-                    trim_idx = 0
-                    while trim_idx < idx and orig_idx < len(content):
-                        if content[orig_idx] == content_trimmed[trim_idx]:
-                            trim_idx += 1
-                        orig_idx += 1
-                    # Find end position
-                    end_trim = idx + len(old_trimmed)
-                    orig_end = orig_idx
-                    trim_cur = trim_idx
-                    while trim_cur < end_trim and orig_end < len(content):
-                        if content[orig_end] == content_trimmed[trim_cur]:
-                            trim_cur += 1
-                        orig_end += 1
-                    return content[:orig_idx] + new + content[orig_end:], 1
-
-        # Strategy 3: Normalized whitespace match
-        def normalize_ws(s: str) -> str:
-            return re.sub(r"\s+", " ", s).strip()
-
-        old_norm = normalize_ws(old)
-        content_norm = normalize_ws(content)
-        if old_norm in content_norm:
-            # Find approximate position using normalized form
-            norm_idx = content_norm.find(old_norm)
-            # Use regex to match with flexible whitespace
-            pattern = re.escape(old).replace(r"\ ", r"\s+").replace(r"\n", r"\s*\n\s*")
-            try:
-                match = re.search(pattern, content, re.DOTALL)
-                if match:
-                    if replace_all:
-                        return re.subn(pattern, new.replace("\\", "\\\\"), content, flags=re.DOTALL)
-                    return content[:match.start()] + new + content[match.end():], 1
-            except re.error:
-                pass
-
-        # Strategy 4: Indentation-flexible match
-        old_dedent = textwrap.dedent(old) if old.startswith((" ", "\t")) else old
-        content_dedent = textwrap.dedent(content) if content.startswith((" ", "\t")) else content
-        if old_dedent in content_dedent:
-            idx = content_dedent.find(old_dedent)
-            return content_dedent[:idx] + new + content_dedent[idx + len(old_dedent):], 1
-
-        return None
 
     async def _list_directory(
         self,
@@ -291,12 +167,8 @@ class ToolsPlugin(Plugin):
             return {"output": f"Not a directory: {path}", "error": f"Not a directory: {path}"}
 
         entries = []
-        try:
-            items = sorted(root.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
-        except PermissionError as e:
-            return {"output": f"Permission denied: {e}", "error": f"Permission denied: {e}"}
 
-        for item in items:
+        for item in sorted(root.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
             if not show_hidden and item.name.startswith("."):
                 continue
             prefix = "[dir] " if item.is_dir() else "[file]"
@@ -310,7 +182,6 @@ class ToolsPlugin(Plugin):
         if not entries:
             return {"output": f"Directory is empty: {path}"}
 
-        # Truncate if too many entries
         if len(entries) > 200:
             entries = entries[:200]
             entries.append(f"... and more (showing first 200)")
@@ -338,96 +209,43 @@ def extract_shell_paths(command: str) -> list[str]:
 
     Returns a list of extracted path strings (may include false positives).
     """
-    import shlex
-
     paths: list[str] = []
+    parts = command.split()
 
-    # Split command by pipes and semicolons first
-    segments = re.split(r'[|;]', command)
+    if not parts:
+        return paths
 
-    for segment in segments:
-        segment = segment.strip()
-        if not segment:
-            continue
+    # Known commands and their path argument positions
+    path_commands = {
+        "cat": [0], "less": [0], "head": [0], "tail": [0],
+        "wc": [0], "diff": [0, 1], "vim": [0], "vi": [0],
+        "nano": [0], "emacs": [0],
+        "python": [0], "python3": [0], "node": [0],
+        "bash": [0], "sh": [0], "zsh": [0],
+        "cp": [0, 1], "mv": [0, 1], "ln": [0, 1],
+        "rm": [0], "mkdir": [0], "rmdir": [0],
+        "touch": [0], "chmod": [1], "chown": [1],
+        "tar": [],  # tar has complex arg parsing
+        "git": [],  # git subcommands make this complex
+    }
 
-        # Handle redirects: > file, >> file, 2> file, &> file
-        redirect_matches = re.findall(r'[\d&]*>\s*(\S+)', segment)
-        for rm in redirect_matches:
-            if not rm.startswith('/') and rm not in ('/dev/null', '/dev/stdout', '/dev/stderr'):
-                paths.append(rm)
+    cmd = parts[0]
+    if cmd in path_commands:
+        for idx in path_commands[cmd]:
+            if idx + 1 < len(parts):
+                arg = parts[idx + 1]
+                if not arg.startswith("-"):
+                    paths.append(arg)
 
-        # Remove redirect parts for further parsing
-        cleaned = re.sub(r'[\d&]*>\s*\S+', '', segment).strip()
+    # Check for redirect targets
+    for i, part in enumerate(parts):
+        if part in (">", ">>") and i + 1 < len(parts):
+            paths.append(parts[i + 1])
 
-        try:
-            tokens = shlex.split(cleaned)
-        except ValueError:
-            # Fallback: simple split
-            tokens = cleaned.split()
+    # Pipe chains
+    if "|" in command:
+        pipe_parts = command.split("|")
+        for pipe_part in pipe_parts[1:]:
+            paths.extend(extract_shell_paths(pipe_part.strip()))
 
-        if not tokens:
-            continue
-
-        cmd = tokens[0]
-
-        # Commands where all non-flag args are file paths
-        file_commands = {
-            'cat', 'less', 'more', 'head', 'tail', 'wc', 'diff', 'chmod', 'chown',
-            'rm', 'unlink', 'ln', 'readlink', 'file', 'stat', 'touch', 'mkdir',
-            'rmdir', 'ls', 'du', 'df', 'find', 'xargs',
-        }
-
-        # Commands where specific positional args are files
-        exec_commands = {'python', 'python3', 'node', 'bash', 'sh', 'zsh', 'ruby', 'perl'}
-
-        # Commands with src dst pattern
-        copy_commands = {'cp', 'mv', 'rename'}
-
-        if cmd in file_commands:
-            skip_next = False
-            for tok in tokens[1:]:
-                if skip_next:
-                    skip_next = False
-                    continue
-                if tok.startswith('-'):
-                    # Flags like -n, --count that take a value
-                    if tok in ('-n', '-c', '-m', '--lines', '--count', '--max-count',
-                               '-d', '--directory', '-C', '--context', '-B', '--before',
-                               '-A', '--after'):
-                        skip_next = True
-                    continue
-                paths.append(tok)
-        elif cmd in exec_commands:
-            # First non-flag arg is the script
-            for tok in tokens[1:]:
-                if tok.startswith('-'):
-                    continue
-                paths.append(tok)
-                break
-        elif cmd in copy_commands:
-            # All non-flag args are paths
-            for tok in tokens[1:]:
-                if tok.startswith('-'):
-                    continue
-                paths.append(tok)
-        else:
-            # Generic: look for tokens that look like file paths
-            for tok in tokens[1:]:
-                if tok.startswith('-'):
-                    continue
-                # Heuristic: contains path separator or file extension
-                if '/' in tok or '\\' in tok or '.' in tok:
-                    paths.append(tok)
-
-    # Filter out obvious non-paths
-    result = []
-    for p in paths:
-        p = p.strip("'\"")
-        if not p or p == '-':
-            continue
-        # Skip URLs
-        if p.startswith(('http://', 'https://', 'ftp://')):
-            continue
-        result.append(p)
-
-    return result
+    return paths

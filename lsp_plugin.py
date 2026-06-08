@@ -160,10 +160,21 @@ class _LSPClient:
         except Exception:
             content = ""
         uri = Path(path).as_uri()
+        ext = Path(path).suffix.lower()
+        lang_map = {
+            ".py": "python", ".pyi": "python",
+            ".ts": "typescript", ".tsx": "typescriptreact",
+            ".js": "javascript", ".jsx": "javascriptreact",
+            ".go": "go",
+            ".rs": "rust",
+            ".json": "json",
+            ".md": "markdown",
+        }
+        language_id = lang_map.get(ext, "plaintext")
         await self._notify("textDocument/didOpen", {
             "textDocument": {
                 "uri": uri,
-                "languageId": "python",
+                "languageId": language_id,
                 "version": 1,
                 "text": content,
             }

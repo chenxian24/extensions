@@ -80,11 +80,12 @@ class ApprovalPlugin(Plugin):
                 return await result
             return bool(result)
 
-        # Default: prompt on stdin
+        # Default: prompt on stdin (non-blocking via executor)
         print(f"\n[approval] Tool '{tool_name}' requires approval.")
         print(f"  Arguments: {arguments}")
         try:
-            response = input("  Allow? [y/N]: ").strip().lower()
-            return response in ("y", "yes")
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(None, lambda: input("  Allow? [y/N]: "))
+            return response.strip().lower() in ("y", "yes")
         except (EOFError, KeyboardInterrupt):
             return False

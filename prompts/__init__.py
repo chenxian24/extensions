@@ -1,4 +1,4 @@
-"""System prompts for the three agent systems: Hermes, OpenCode, OpenClaw."""
+"""System prompts for the four agent systems: Hermes, OpenCode, OpenClaw, Codex."""
 
 from extensions.prompts.loader import load_prompt_file, load_prompt_sections
 
@@ -43,6 +43,22 @@ from extensions.prompts.opencode import (
     OPENCODE_TOOL_USAGE,
     OPENCODE_WORKFLOW,
 )
+from extensions.prompts.codex import (
+    APPROVAL_NEVER,
+    APPROVAL_ON_REQUEST,
+    APPROVAL_POLICIES,
+    APPROVAL_UNLESS_TRUSTED,
+    CODEX_BASE_PROMPT,
+    CODEX_CODING_GUIDELINES,
+    CODEX_ENVIRONMENT_TEMPLATE,
+    CODEX_IDENTITY,
+    CODEX_TOOL_USAGE,
+    CODEX_WORKFLOW,
+    SANDBOX_DANGER_FULL_ACCESS,
+    SANDBOX_MODES,
+    SANDBOX_READ_ONLY,
+    SANDBOX_WORKSPACE_WRITE,
+)
 
 __all__ = [
     # Loader
@@ -86,4 +102,19 @@ __all__ = [
     "OPENCLAW_COMMUNICATION",
     "OPENCLAW_BEHAVIOR_CONTRACT",
     "OPENCLAW_INTERACTION_STYLE",
+    # Codex
+    "CODEX_IDENTITY",
+    "CODEX_BASE_PROMPT",
+    "CODEX_CODING_GUIDELINES",
+    "CODEX_TOOL_USAGE",
+    "CODEX_WORKFLOW",
+    "CODEX_ENVIRONMENT_TEMPLATE",
+    "SANDBOX_READ_ONLY",
+    "SANDBOX_WORKSPACE_WRITE",
+    "SANDBOX_DANGER_FULL_ACCESS",
+    "SANDBOX_MODES",
+    "APPROVAL_UNLESS_TRUSTED",
+    "APPROVAL_ON_REQUEST",
+    "APPROVAL_NEVER",
+    "APPROVAL_POLICIES",
 ]

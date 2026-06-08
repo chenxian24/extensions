@@ -1,13 +1,17 @@
-"""OpenClaw Runner — secure CLI agent using agentcore + extensions.
+"""Codex Runner — AI coding assistant built on agentcore + extensions.
 
 Usage:
-    python -m extensions.openclaw_runner
-    OPENAI_API_KEY=sk-xxx python -m extensions.openclaw_runner
+    python -m extensions.codex_runner
+    OPENAI_API_KEY=sk-xxx python -m extensions.codex_runner
 
 Environment variables:
     OPENAI_API_KEY   — API key (required)
     OPENAI_MODEL     — model name (default: gpt-4o)
     OPENAI_BASE_URL  — API base URL (optional)
+
+Config file:
+    ~/.codex/config.toml — user-level config
+    .codex/config.toml  — project-level config (overrides user)
 """
 
 from __future__ import annotations
@@ -28,41 +32,26 @@ from agentcore.prompts.builder import DynamicPromptBuilder
 from agentcore.runtime import AgentRuntime
 
 # Extension plugins
-from extensions.commands_plugin import CommandsPlugin
-from extensions.config_plugin import ConfigPlugin
+from extensions.agents_plugin import AgentsPlugin
+from extensions.approval_plugin import ApprovalPlugin
+from extensions.codex_commands_plugin import CodexCommandsPlugin
+from extensions.codex_config_plugin import CodexConfigPlugin
+from extensions.prompts.codex import (
+    CODEX_BASE_PROMPT,
+    CODEX_CODING_GUIDELINES,
+    CODEX_IDENTITY,
+    CODEX_TOOL_USAGE,
+    CODEX_WORKFLOW,
+)
 from extensions.context_plugin import ContextPlugin
 from extensions.core_toolkit import CoreToolkitPlugin
-from extensions.dm_pairing_plugin import DMPairingPlugin
-from extensions.mcp_plugin import MCPPlugin
+from extensions.edit_plugin import EditPlugin
 from extensions.memory_plugin import MemoryPlugin
+from extensions.mcp_plugin import MCPPlugin
 from extensions.sandbox_plugin import SandboxPlugin
 from extensions.security_policy_plugin import SecurityPolicyPlugin
-from extensions.session_dag_plugin import SessionDAGPlugin
 from extensions.skills_plugin import SkillsPlugin
 from extensions.tools_plugin import ToolsPlugin
-from extensions.tool_search_plugin import ToolSearchPlugin
-from extensions.trajectory_plugin import TrajectoryPlugin
-from extensions.prompts.openclaw import (
-    OPENCLAW_BASE_PROMPT,
-    OPENCLAW_BEHAVIOR_CONTRACT,
-    OPENCLAW_COMMUNICATION,
-    OPENCLAW_DOCS,
-    OPENCLAW_EXECUTION_BIAS,
-    OPENCLAW_IDENTITY,
-    OPENCLAW_INTERACTION_STYLE,
-    OPENCLAW_SAFETY,
-    OPENCLAW_SANDBOX,
-    OPENCLAW_SECURITY_POLICY,
-    OPENCLAW_SILENT_REPLIES,
-    OPENCLAW_SKILLS,
-    OPENCLAW_SUBAGENT_DELEGATION,
-    OPENCLAW_TOOL_CALL_STYLE,
-    OPENCLAW_TOOLING,
-    OPENCLAW_TRAJECTORY,
-)
-from extensions.prompts.loader import load_prompt_sections
-
-_PROMPTS_DIR = Path(__file__).parent / "prompts" / "openclaw"
 
 
 # ---------------------------------------------------------------------------
@@ -98,31 +87,37 @@ def _color(text: str, *codes: str) -> str:
 # Config builder
 # ---------------------------------------------------------------------------
 
-def build_config(config_plugin: ConfigPlugin | None = None) -> AgentConfig:
+def build_config(config_plugin: CodexConfigPlugin | None = None) -> AgentConfig:
+    """Build config from CodexConfigPlugin + environment variables."""
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
         print(_color("Error: OPENAI_API_KEY environment variable is required", Colors.RED, Colors.BOLD))
         sys.exit(1)
 
-    hermes: dict[str, Any] = {}
+    codex: dict[str, Any] = {}
     if config_plugin:
-        hermes = config_plugin.config
+        codex = config_plugin.config
+
+    model_cfg = codex.get("model", {})
+    sandbox_cfg = codex.get("sandbox", {})
+    approval_cfg = codex.get("approval", {})
+    agent_cfg = codex.get("agent", {})
 
     return AgentConfig(
         model=ModelConfig(
-            provider=hermes.get("provider", "openai"),
-            model=hermes.get("model", os.environ.get("OPENAI_MODEL", "gpt-4o")),
+            provider=model_cfg.get("provider", os.environ.get("CODEX_PROVIDER", "openai")),
+            model=model_cfg.get("model", os.environ.get("OPENAI_MODEL", "gpt-4o")),
             api_key=api_key,
-            base_url=os.environ.get("OPENAI_BASE_URL", ""),
-            temperature=hermes.get("temperature", 0.7),
-            max_tokens=hermes.get("max_tokens", 16384),
-            timeout=float(hermes.get("timeout", 120.0)),
+            base_url=os.environ.get("OPENAI_BASE_URL", model_cfg.get("base_url", "")),
+            temperature=model_cfg.get("temperature", 0.3),
+            max_tokens=model_cfg.get("max_tokens", 16384),
+            timeout=float(model_cfg.get("timeout", 120.0)),
         ),
         runtime=RuntimeConfig(
-            max_tool_rounds=hermes.get("max_tool_rounds", 20),
+            max_tool_rounds=agent_cfg.get("max_rounds", 20),
         ),
         system_prompt=SystemPromptConfig(
-            template=OPENCLAW_BASE_PROMPT,
+            template=CODEX_BASE_PROMPT,
         ),
     )
 
@@ -135,8 +130,8 @@ async def run() -> None:
     if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
         Colors.disable()
 
-    # --- Config ---
-    config_plugin = ConfigPlugin()
+    # --- Config plugin (loads ~/.codex/config.toml) ---
+    config_plugin = CodexConfigPlugin()
     config = build_config(config_plugin)
 
     # --- Atomic layer ---
@@ -150,32 +145,67 @@ async def run() -> None:
         context=None,
         events=None,
     )
-    # Base plugins
+
+    # Config plugin (first — loads config, registers instructions hook)
     pm.register(config_plugin)
+
+    # Core tools (MCP bridge for file I/O + shell)
     pm.register(CoreToolkitPlugin())
-    pm.register(MCPPlugin())
+
+    # File tools
     pm.register(ToolsPlugin())
+    pm.register(EditPlugin())
+
+    # Sandbox (codex-style sandboxed execution)
+    codex_config = config_plugin.config
+    sandbox_cfg = codex_config.get("sandbox", {})
+    pm.register(SandboxPlugin(
+        default_backend=sandbox_cfg.get("backend", "local"),
+        docker_image=sandbox_cfg.get("docker_image", "python:3.12-slim"),
+        allowed_dirs=sandbox_cfg.get("writable_roots", ["."]),
+    ))
+
+    # Security (11-layer policy pipeline)
+    pm.register(SecurityPolicyPlugin())
+
+    # Approval (human-in-the-loop gate)
+    approval_cfg = codex_config.get("approval", {})
+    approval_policy = approval_cfg.get("policy", "on_request")
+
+    # Configure approval based on policy
+    if approval_policy == "never":
+        # No approval needed — empty list
+        approval_tools: list[str] = []
+    elif approval_policy == "unless_trusted":
+        # Most tools need approval
+        approval_tools = ["write_file", "edit_file", "execute_command", "execute_sandboxed"]
+    else:
+        # on_request — only dangerous tools
+        approval_tools = ["execute_command", "execute_sandboxed"]
+
+    pm.register(ApprovalPlugin(tools_needing_approval=approval_tools))
+
+    # Sub-agents
+    pm.register(AgentsPlugin())
+
+    # Memory + Context + Skills
     pm.register(MemoryPlugin())
     pm.register(ContextPlugin())
-    # OpenClaw security plugins
-    pm.register(SecurityPolicyPlugin())
-    pm.register(SandboxPlugin())
-    pm.register(DMPairingPlugin())
-    # OpenClaw feature plugins
-    pm.register(TrajectoryPlugin())
-    pm.register(SessionDAGPlugin())
-    pm.register(ToolSearchPlugin())
-    # CLI plugins
-    pm.register(CommandsPlugin())
     pm.register(SkillsPlugin())
 
-    # --- Runtime (composes hooks, tools, context, events, plugins) ---
+    # MCP client (for external MCP servers)
+    pm.register(MCPPlugin())
+
+    # Codex commands
+    pm.register(CodexCommandsPlugin())
+
+    # --- Runtime ---
     runtime = AgentRuntime(engine=engine, plugins=pm)
     await runtime.initialize()
 
     # --- Build system prompt ---
-    hermes_config = config.metadata.get("hermes", {})
-    skills: list[dict[str, Any]] = hermes_config.get("skills", [])
+    codex_meta = config.metadata.get("codex", {})
+    skills: list[dict[str, Any]] = codex_meta.get("skills", [])
 
     extra_sections: dict[str, str] = {}
     for skill in skills:
@@ -188,71 +218,30 @@ async def run() -> None:
                 title += f" — {description}"
             extra_sections[title] = content
 
-    # Add environment info
-    import platform
-    _os_name = platform.system()
-    _os_info = platform.platform()
-    _shell = "cmd.exe / PowerShell" if _os_name == "Windows" else "bash/sh"
-    extra_sections["Environment"] = (
-        f"OS: {_os_info}\n"
-        f"Shell: {_shell}\n"
-        f"Use OS-appropriate commands. "
-        f"On Windows, use `dir` not `ls`, `type` not `cat`, `findstr` not `grep`, "
-        f"`more` not `head`/`tail`, `del` not `rm`, `copy` not `cp`."
-    )
-
-    # Add OpenClaw sections (load from .md files, fallback to Python constants)
-    _md_sections = load_prompt_sections(_PROMPTS_DIR)
-    _fallback = {
-        "Tooling": OPENCLAW_TOOLING,
-        "Tool Call Style": OPENCLAW_TOOL_CALL_STYLE,
-        "Execution Bias": OPENCLAW_EXECUTION_BIAS,
-        "Safety": OPENCLAW_SAFETY,
-        "Security Policy": OPENCLAW_SECURITY_POLICY,
-        "Sandbox": OPENCLAW_SANDBOX,
-        "Subagent Delegation": OPENCLAW_SUBAGENT_DELEGATION,
-        "Trajectory": OPENCLAW_TRAJECTORY,
-        "Skills": OPENCLAW_SKILLS,
-        "Docs": OPENCLAW_DOCS,
-        "Silent Replies": OPENCLAW_SILENT_REPLIES,
-        "Communication": OPENCLAW_COMMUNICATION,
-        "Behavior Contract": OPENCLAW_BEHAVIOR_CONTRACT,
-        "Interaction Style": OPENCLAW_INTERACTION_STYLE,
-    }
-    for key, fallback_val in _fallback.items():
-        extra_sections[key] = _md_sections.get(key, fallback_val)
-
     prompt_builder = DynamicPromptBuilder(
         tool_registry=runtime.tools,
         base_prompt=config.system_prompt.template,
-        identity=OPENCLAW_IDENTITY,
+        identity=CODEX_IDENTITY,
         extra_sections=extra_sections if extra_sections else None,
     )
     config.system_prompt = SystemPromptConfig(template=prompt_builder.build())
     engine.configure(config)
 
     # --- Session ---
-    session_dir = Path(hermes_config.get("session_dir", Path.home() / ".openclaw" / "sessions"))
+    session_dir = Path(codex_config.get("session_dir", Path.home() / ".codex" / "sessions"))
     session_dir.mkdir(parents=True, exist_ok=True)
     session_name = f"session-{int(time.time())}"
     session = await runtime.create_session(session_name)
 
-    # Store session reference for DAG plugin
-    config.metadata["_current_session"] = session
-
-    # --- Session save ---
+    # --- Session save helper ---
     def _auto_save() -> None:
         if not session.messages:
             return
         save_path = session_dir / f"{session_name}.json"
-        messages_data = []
-        for msg in session.messages:
-            messages_data.append({
-                "role": msg.role.value,
-                "content": msg.content,
-                "name": msg.name,
-                "tool_call_id": msg.tool_call_id,
-            })
+        messages_data = [
+            {"role": m.role.value, "content": m.content, "name": m.name, "tool_call_id": m.tool_call_id}
+            for m in session.messages
+        ]
         try:
             save_path.write_text(json.dumps(messages_data, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:
@@ -260,13 +249,11 @@ async def run() -> None:
 
     # --- CLI loop ---
     tool_count = len(runtime.tools.list_names())
-    skill_count = len(skills)
+    sandbox_mode = config_plugin.sandbox_mode
 
-    print(_color("OpenClaw CLI", Colors.BOLD, Colors.MAGENTA), end="")
-    print(_color(f" — {tool_count} tools", Colors.DIM), end="")
-    if skill_count:
-        print(_color(f", {skill_count} skills", Colors.DIM), end="")
-    print(_color(" — security: 11-layer policy + sandbox", Colors.DIM))
+    print(_color("Codex CLI", Colors.BOLD, Colors.GREEN), end="")
+    print(_color(f" — {tool_count} tools, sandbox: {sandbox_mode}", Colors.DIM), end="")
+    print(_color(f", approval: {approval_policy}", Colors.DIM))
     print(_color("  /help for commands, Ctrl+C to exit", Colors.DIM))
     print()
 
@@ -281,7 +268,7 @@ async def run() -> None:
                 continue
 
             try:
-                print(_color("OpenClaw: ", Colors.GREEN, Colors.BOLD), end="", flush=True)
+                print(_color("Codex: ", Colors.GREEN, Colors.BOLD), end="", flush=True)
                 async for event in runtime.run(user_input, max_rounds=config.runtime.max_tool_rounds):
                     if event.type == StreamEventType.TEXT_DELTA and event.text:
                         print(event.text, end="", flush=True)
@@ -291,12 +278,12 @@ async def run() -> None:
                         result = event.tool_result or {}
                         output = result.get("output", result.get("error", ""))
                         if output:
-                            display = str(output)[:300]
-                            if len(str(output)) > 300:
+                            display = str(output)[:500]
+                            if len(str(output)) > 500:
                                 display += "..."
-                            print(_color(f"  {display}", Colors.DIM), flush=True)
-                        print(_color("OpenClaw: ", Colors.GREEN, Colors.BOLD), end="", flush=True)
-                print()  # newline after response
+                            print(_color(f"\n  {display}", Colors.DIM), flush=True)
+                        print(_color("Codex: ", Colors.GREEN, Colors.BOLD), end="", flush=True)
+                print()
             except KeyboardInterrupt:
                 print(_color("\n[Interrupted]", Colors.YELLOW))
                 continue
@@ -307,7 +294,7 @@ async def run() -> None:
             print()
 
     except KeyboardInterrupt:
-        print(_color("\nGoodbye!", Colors.MAGENTA))
+        print(_color("\nGoodbye!", Colors.GREEN))
     finally:
         await runtime.end_session()
         _auto_save()

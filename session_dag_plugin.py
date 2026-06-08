@@ -145,8 +145,12 @@ class SessionDAGPlugin(Plugin):
             from agentcore.core.message import Message, MessageRole
             session.clear()
             for m in messages:
+                try:
+                    role = MessageRole(m["role"])
+                except (ValueError, KeyError):
+                    role = MessageRole.USER
                 msg = Message(
-                    role=MessageRole(m["role"]),
+                    role=role,
                     content=m.get("content", ""),
                     name=m.get("name", ""),
                     tool_call_id=m.get("tool_call_id", ""),

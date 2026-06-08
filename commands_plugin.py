@@ -70,9 +70,11 @@ class CommandsPlugin(Plugin):
 
         if cmd_info and "handler" in cmd_info:
             handler = cmd_info["handler"]
-            result = handler(ctx, cmd_args) if cmd_args else handler(ctx)
-            # Await if coroutine
             import asyncio
+            try:
+                result = handler(ctx, cmd_args) if cmd_args else handler(ctx)
+            except TypeError:
+                result = handler(ctx)
             if asyncio.iscoroutine(result):
                 result = await result
             ctx.cancel = True
