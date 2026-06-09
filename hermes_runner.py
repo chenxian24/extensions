@@ -153,13 +153,13 @@ async def run() -> None:
     pm.register(SkillsPlugin())
 
     # --- Runtime (composes hooks, tools, context, events, plugins) ---
-    session_dir = Path(hermes.get("session_dir", Path.home() / ".hermes" / "sessions"))
+    hermes_config = config.metadata.get("hermes", {})
+    session_dir = Path(hermes_config.get("session_dir", Path.home() / ".hermes" / "sessions"))
     session_dir.mkdir(parents=True, exist_ok=True)
     runtime = AgentRuntime(engine=engine, plugins=pm, session_store=JsonlSessionStore(session_dir))
     await runtime.initialize()
 
     # --- Build system prompt with tool descriptions + skills ---
-    hermes_config = config.metadata.get("hermes", {})
     skills: list[dict[str, Any]] = hermes_config.get("skills", [])
 
     # Build extra sections from skills
