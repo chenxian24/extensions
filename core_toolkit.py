@@ -57,7 +57,7 @@ class _MCPBridge:
                 )
             try:
                 self._reader, self._writer = await asyncio.wait_for(
-                    asyncio.open_connection("127.0.0.1", port), timeout=1.0
+                    asyncio.open_connection("127.0.0.1", port, limit=10 * 1024 * 1024), timeout=1.0
                 )
                 break
             except (ConnectionRefusedError, OSError, asyncio.TimeoutError) as e:
