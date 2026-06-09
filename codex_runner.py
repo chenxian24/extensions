@@ -271,7 +271,6 @@ async def run() -> None:
                             if len(str(output)) > 500:
                                 display += "..."
                             print(_color(f"\n  {display}", Colors.DIM), flush=True)
-                        print(_color("Codex: ", Colors.GREEN, Colors.BOLD), end="", flush=True)
                 print()
             except KeyboardInterrupt:
                 print(_color("\n[Interrupted]", Colors.YELLOW))

@@ -250,8 +250,7 @@ async def run() -> None:
                             display = str(output)[:300]
                             if len(str(output)) > 300:
                                 display += "..."
-                            print(_color(f"  {display}", Colors.DIM), flush=True)
-                        print(_color("Hermes: ", Colors.GREEN, Colors.BOLD), end="", flush=True)
+                            print(_color(f"\n  {display}", Colors.DIM), flush=True)
                 print()  # newline after response
             except KeyboardInterrupt:
                 print(_color("\n[Interrupted]", Colors.YELLOW))
