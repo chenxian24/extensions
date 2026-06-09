@@ -112,7 +112,7 @@ def build_config(config_plugin: CodexConfigPlugin | None = None) -> AgentConfig:
             base_url=os.environ.get("OPENAI_BASE_URL", model_cfg.get("base_url", "")),
             temperature=model_cfg.get("temperature", 0.3),
             max_tokens=model_cfg.get("max_tokens", 16384),
-            timeout=float(model_cfg.get("timeout", 120.0)),
+            timeout=float(model_cfg.get("timeout", 300.0)),
         ),
         runtime=RuntimeConfig(
             max_tool_rounds=agent_cfg.get("max_rounds", 20),

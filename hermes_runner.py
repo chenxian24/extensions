@@ -107,7 +107,7 @@ def build_config(config_plugin: ConfigPlugin | None = None) -> AgentConfig:
             base_url=os.environ.get("OPENAI_BASE_URL", ""),
             temperature=hermes.get("temperature", 0.7),
             max_tokens=hermes.get("max_tokens", 16384),
-            timeout=float(hermes.get("timeout", 120.0)),
+            timeout=float(hermes.get("timeout", 300.0)),
         ),
         runtime=RuntimeConfig(
             max_tool_rounds=hermes.get("max_tool_rounds", 20),
