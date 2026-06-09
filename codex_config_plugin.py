@@ -208,7 +208,7 @@ class CodexConfigPlugin(Plugin):
             info_parts.append("Rust project")
         if (root / "go.mod").exists():
             info_parts.append("Go project")
-        if (root / "pyproject.toml").exists() or (root / "setup.py").exists():
+        if (root / "pyproject.toml").exists() or (root / "setup.py").exists() or (root / "requirements.txt").exists() or (root / "Pipfile").exists():
             info_parts.append("Python project")
         if (root / "Makefile").exists():
             info_parts.append("Has Makefile")
@@ -217,7 +217,7 @@ class CodexConfigPlugin(Plugin):
 
         return ", ".join(info_parts) if info_parts else "Unknown project type"
 
-    async def _show_config(self, ctx: HookContext) -> None:
+    async def _show_config(self, ctx: HookContext, _args: str = "") -> str:
         """Show current Codex configuration."""
         import json
-        print(json.dumps(self._config, indent=2, default=str))
+        return json.dumps(self._config, indent=2, default=str)

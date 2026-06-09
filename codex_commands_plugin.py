@@ -115,9 +115,34 @@ class CodexCommandsPlugin(CommandsPlugin):
 
     async def _cmd_review(self, ctx: HookContext, _args: str = "") -> str:
         """Request code review via sub-agent."""
-        if ctx.engine and hasattr(ctx.engine, 'config'):
-            ctx.engine.config.metadata.setdefault("codex", {})["review_requested"] = True
-        return "Code review requested. The agent will review recent changes on the next turn."
+        # Get git diff for review context
+        diff_output = ""
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--stat"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                diff_output = result.stdout.strip()
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+        # Delegate to a sub-agent for review
+        agents = ctx.config.metadata.get("_agents_plugin")
+        if agents and hasattr(agents, '_manager') and agents._manager:
+            from agentcore.agents.manager import SubAgentTask
+            review_context = f"Git diff --stat:\n{diff_output}" if diff_output else "No git diff available."
+            task = SubAgentTask(
+                description="Code review of recent changes",
+                prompt=f"Review the recent code changes for bugs, style issues, and potential problems.\n\n{review_context}",
+                metadata={"agent": "explore"},
+            )
+            result = await agents._manager.delegate(task)
+            if result.success:
+                return f"Code Review:\n{result.output}"
+            return f"Review failed: {result.error}"
+
+        return "Agent system not available for review."
 
     async def _cmd_approve(self, ctx: HookContext, _args: str = "") -> str:
         """Approve pending tool call."""

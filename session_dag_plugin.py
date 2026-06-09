@@ -254,8 +254,8 @@ class SessionDAGPlugin(Plugin):
         fork_point = row[1]
         current_messages = self._get_session_messages()
 
-        # Merge: keep messages before fork_point from current, add branch messages after
-        merged = current_messages[:fork_point] + branch_messages
+        # Merge: common history up to fork_point, then branch's unique messages after fork_point
+        merged = current_messages[:fork_point] + branch_messages[fork_point:]
         self._set_session_messages(merged)
 
         return {"output": f"Merged branch '{row[2]}': {len(merged)} total messages"}

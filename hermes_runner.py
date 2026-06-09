@@ -8,7 +8,6 @@ Environment variables:
     OPENAI_API_KEY   — API key (required)
     OPENAI_MODEL     — model name (default: gpt-4o)
     OPENAI_BASE_URL  — API base URL (optional)
-    HERMES_STREAMING — enable streaming (default: true)
 """
 
 from __future__ import annotations
@@ -23,10 +22,10 @@ from typing import Any
 
 from agentcore.config.schema import AgentConfig, ModelConfig, RuntimeConfig, SystemPromptConfig
 from agentcore.core.engine import AgentEngine
-from agentcore.models.base import ChatParams
 from agentcore.models.events import StreamEvent, StreamEventType
 from agentcore.plugins.manager import PluginManager
 from agentcore.prompts.builder import DynamicPromptBuilder
+from agentcore.core.session_store import JsonlSessionStore
 from agentcore.runtime import AgentRuntime
 
 # Extension plugins
@@ -154,7 +153,9 @@ async def run() -> None:
     pm.register(SkillsPlugin())
 
     # --- Runtime (composes hooks, tools, context, events, plugins) ---
-    runtime = AgentRuntime(engine=engine, plugins=pm)
+    session_dir = Path(hermes.get("session_dir", Path.home() / ".hermes" / "sessions"))
+    session_dir.mkdir(parents=True, exist_ok=True)
+    runtime = AgentRuntime(engine=engine, plugins=pm, session_store=JsonlSessionStore(session_dir))
     await runtime.initialize()
 
     # --- Build system prompt with tool descriptions + skills ---
@@ -211,29 +212,8 @@ async def run() -> None:
     engine.configure(config)
 
     # --- Session ---
-    session_dir = Path(hermes_config.get("session_dir", Path.home() / ".hermes" / "sessions"))
-    session_dir.mkdir(parents=True, exist_ok=True)
     session_name = f"session-{int(time.time())}"
     session = await runtime.create_session(session_name)
-
-    # --- Session save helper ---
-    def _auto_save() -> None:
-        """Auto-save session on exit."""
-        if not session.messages:
-            return
-        save_path = session_dir / f"{session_name}.json"
-        messages_data = []
-        for msg in session.messages:
-            messages_data.append({
-                "role": msg.role.value,
-                "content": msg.content,
-                "name": msg.name,
-                "tool_call_id": msg.tool_call_id,
-            })
-        try:
-            save_path.write_text(json.dumps(messages_data, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception:
-            pass
 
     # --- CLI loop ---
     skill_count = len(skills)
@@ -286,8 +266,7 @@ async def run() -> None:
         print(_color("\nGoodbye!", Colors.CYAN))
     finally:
         await runtime.end_session()
-        _auto_save()
-        print(_color(f"Session saved: {session_name}.json", Colors.DIM))
+        print(_color(f"Session saved: {session_name}", Colors.DIM))
         await runtime.shutdown()
 
 

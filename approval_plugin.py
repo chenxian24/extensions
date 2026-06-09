@@ -68,12 +68,19 @@ class ApprovalPlugin(Plugin):
             except json.JSONDecodeError:
                 args = {"raw": args}
 
-        approved = await self._get_approval(tool_name, args)
+        approved = await self._get_approval(tool_name, args, ctx)
         if not approved:
             ctx.cancel = True
             ctx.metadata["cancel_reason"] = f"Tool '{tool_name}' was denied by user approval"
 
-    async def _get_approval(self, tool_name: str, arguments: dict) -> bool:
+    async def _get_approval(self, tool_name: str, arguments: dict, ctx: HookContext | None = None) -> bool:
+        # Check if /approve or /reject command set a response
+        if ctx:
+            response = ctx.metadata.get("approval_response")
+            if response:
+                ctx.metadata.pop("approval_response", None)
+                return response == "approved"
+
         if self._approval_fn:
             result = self._approval_fn(tool_name, arguments)
             if asyncio.iscoroutine(result):

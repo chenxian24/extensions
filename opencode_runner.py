@@ -25,6 +25,7 @@ from agentcore.core.engine import AgentEngine
 from agentcore.models.events import StreamEvent, StreamEventType
 from agentcore.plugins.manager import PluginManager
 from agentcore.prompts.builder import DynamicPromptBuilder
+from agentcore.core.session_store import JsonlSessionStore
 from agentcore.runtime import AgentRuntime
 
 # Extension plugins
@@ -167,7 +168,9 @@ async def run() -> None:
     pm.register(SkillsPlugin())
 
     # --- Runtime (composes hooks, tools, context, events, plugins) ---
-    runtime = AgentRuntime(engine=engine, plugins=pm)
+    session_dir = Path(hermes.get("session_dir", Path.home() / ".opencode" / "sessions"))
+    session_dir.mkdir(parents=True, exist_ok=True)
+    runtime = AgentRuntime(engine=engine, plugins=pm, session_store=JsonlSessionStore(session_dir))
     await runtime.initialize()
 
     # --- Build system prompt ---
@@ -222,24 +225,8 @@ async def run() -> None:
     engine.configure(config)
 
     # --- Session ---
-    session_dir = Path(hermes_config.get("session_dir", Path.home() / ".opencode" / "sessions"))
-    session_dir.mkdir(parents=True, exist_ok=True)
     session_name = f"session-{int(time.time())}"
     session = await runtime.create_session(session_name)
-
-    # --- Session save helper ---
-    def _auto_save() -> None:
-        if not session.messages:
-            return
-        save_path = session_dir / f"{session_name}.json"
-        messages_data = [
-            {"role": m.role.value, "content": m.content, "name": m.name, "tool_call_id": m.tool_call_id}
-            for m in session.messages
-        ]
-        try:
-            save_path.write_text(json.dumps(messages_data, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception:
-            pass
 
     # --- CLI loop ---
     tool_count = len(runtime.tools.list_names())
@@ -290,8 +277,7 @@ async def run() -> None:
         print(_color("\nGoodbye!", Colors.BLUE))
     finally:
         await runtime.end_session()
-        _auto_save()
-        print(_color(f"Session saved: {session_name}.json", Colors.DIM))
+        print(_color(f"Session saved: {session_name}", Colors.DIM))
         await runtime.shutdown()
 
 
